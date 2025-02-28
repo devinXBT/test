@@ -47,6 +47,21 @@ def connect_rpc():
 
 w3 = connect_rpc()
 
+# Define addresses to exclude (add more addresses as needed)
+blacklist_addresses = [
+    "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB",
+    "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+    "0xb0505e5a99abd03d94a1169e638B78EDfEd26ea4",
+    "0x22Cf19B7D8DE1B53BbD9792e12eA86191985731F",
+"0xc694a91e6b071bF030A18BD3053A7fE09B6DaE69",
+"0xD04383398dD2426297da660F9CCA3d439AF9ce1b",
+"0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2",
+"0x18a7E9322fe07f4E94c38a2B9A1F2d8489Ff294D",
+"0xeB162b57B70056514Bd5fbBf539F776CA87A6CCD",
+]
+BLACKLISTED_TOKENS = {w3.to_checksum_address(addr) for addr in blacklist_addresses}
+
+
 # ABIs
 factory_v3_abi = [{"inputs":[{"internalType":"address","name":"token0","type":"address"},{"internalType":"address","name":"token1","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"}],"name":"getPool","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}]
 factory_v2_abi = [{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"}],"name":"getPair","outputs":[{"internalType":"address","name":"pair","type":"address"}],"stateMutability":"view","type":"function"}]
@@ -94,40 +109,6 @@ def get_token_info(token_address):
     except:
         return "Unknown", "UNK", 18
 
-# Add Transfer event ABI for holder count
-transfer_event_abi = {
-    "anonymous": False,
-    "inputs": [
-        {"indexed": True, "name": "from", "type": "address"},
-        {"indexed": True, "name": "to", "type": "address"},
-        {"indexed": False, "name": "value", "type": "uint256"}
-    ],
-    "name": "Transfer",
-    "type": "event"
-}
-
-def get_holder_count(token_address):
-    try:
-        token = w3.eth.contract(address=token_address, abi=[transfer_event_abi])
-        latest_block = w3.eth.block_number
-        logs = w3.eth.get_logs({
-            "fromBlock": latest_block - 20000,  # Last ~2-3 days of transfers
-            "toBlock": "latest",
-            "address": token_address,
-            "topics": [w3.keccak(text="Transfer(address,address,uint256)").hex()]
-        })
-
-        holders = set()
-        for log in logs:
-            sender = "0x" + log["topics"][1].hex()[-40:]
-            receiver = "0x" + log["topics"][2].hex()[-40:]
-            holders.add(sender)
-            holders.add(receiver)
-
-        return len(holders)
-    except:
-        return 0  # Assume no holders if error occurs
-
 def process_transaction(tx):
     try:
         if tx["hash"].hex() in seen_txs or tx["to"] is None:
@@ -155,26 +136,13 @@ def process_transaction(tx):
             logger.info(f"Token {token_address} already listed, skipping.")
             return
 
-        # Get holder count and filter out if more than 100 holders
-        holder_count = get_holder_count(token_address)
-        if holder_count > 100:
-            logger.info(f"Skipping {token_address} - {holder_count} holders (Above 100)")
-            return
-
         name, symbol, decimals = get_token_info(token_address)
-
-        # Filter out tokens with ticker "UNI-V2"
-        if symbol == "UNI-V2":
-            logger.info(f"Skipping {name} ({symbol}) - Ticker is UNI-V2")
-            return
-
         human_amount = amount / (10 ** decimals)
 
-        # Colored CLI Output with clickable token address for Base Network
-        token_url = f"https://basescan.org/token/{token_address}"
+        # Colored CLI Output with Base Scan URL for token address
         print(f"{GREEN}Token: {name} ({symbol}){RESET}")
         print(f"{YELLOW}Tx Hash: {tx['hash'].hex()}{RESET}")
-        print(f"{BLUE}Token Address: {token_url}{RESET}")
+        print(f"{BLUE}Token Address: https://basescan.org/address/{token_address}{RESET}")  # Link to Base Scan
         print(f"Spender: {spender} ({spender_router if spender_router else 'Unknown'})")
         print("-" * 50)
 
