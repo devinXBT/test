@@ -1,18 +1,15 @@
 from web3 import Web3
 import time
+import threading
 import logging
 import os
-import threading
-import requests
 from dotenv import load_dotenv
 from collections import deque
 from cachetools import TTLCache
-from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables
 load_dotenv()
 ALCHEMY_BASE_RPC = os.getenv("ALCHEMY_BASE_RPC")
-ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
 
 # Contract Addresses
 UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
@@ -68,49 +65,68 @@ def is_token_listed(token_address):
     if token_address in token_cache:
         return token_cache[token_address]
 
-    try:
-        for fee in [100, 500, 3000, 10000]:
+    for fee in [100, 500, 3000, 10000]:
+        try:
             pool = factory_v3.functions.getPool(token_address, WETH, fee).call()
             if pool != "0x0000000000000000000000000000000000000000":
                 token_cache[token_address] = True
                 return True
-
+        except:
+            continue
+    try:
         pair = factory_v2.functions.getPair(token_address, WETH).call()
         if pair != "0x0000000000000000000000000000000000000000":
             token_cache[token_address] = True
             return True
-    except Exception as e:
-        logger.error(f"Error checking liquidity for {token_address}: {e}")
+    except:
+        pass
 
     token_cache[token_address] = False
     return False
 
-def get_holder_count(token_address):
-    try:
-        alchemy_url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "alchemy_getTokenBalances",
-            "params": [token_address, "erc20"],
-            "id": 1,
-        }
-        response = requests.post(alchemy_url, json=payload, headers=headers).json()
-        return len(response.get("result", {}).get("tokenBalances", []))
-    except Exception as e:
-        logger.error(f"Error fetching holder count for {token_address}: {e}")
-        return 9999  
-
 def get_token_info(token_address):
     token = w3.eth.contract(address=token_address, abi=erc20_abi)
     try:
-        return (
-            token.functions.name().call(),
-            token.functions.symbol().call(),
-            token.functions.decimals().call(),
-        )
+        name = token.functions.name().call()
+        symbol = token.functions.symbol().call()
+        decimals = token.functions.decimals().call()
+        return name, symbol, decimals
     except:
         return "Unknown", "UNK", 18
+
+# Add Transfer event ABI for holder count
+transfer_event_abi = {
+    "anonymous": False,
+    "inputs": [
+        {"indexed": True, "name": "from", "type": "address"},
+        {"indexed": True, "name": "to", "type": "address"},
+        {"indexed": False, "name": "value", "type": "uint256"}
+    ],
+    "name": "Transfer",
+    "type": "event"
+}
+
+def get_holder_count(token_address):
+    try:
+        token = w3.eth.contract(address=token_address, abi=[transfer_event_abi])
+        latest_block = w3.eth.block_number
+        logs = w3.eth.get_logs({
+            "fromBlock": latest_block - 20000,  # Last ~2-3 days of transfers
+            "toBlock": "latest",
+            "address": token_address,
+            "topics": [w3.keccak(text="Transfer(address,address,uint256)").hex()]
+        })
+
+        holders = set()
+        for log in logs:
+            sender = "0x" + log["topics"][1].hex()[-40:]
+            receiver = "0x" + log["topics"][2].hex()[-40:]
+            holders.add(sender)
+            holders.add(receiver)
+
+        return len(holders)
+    except:
+        return 0  # Assume no holders if error occurs
 
 def process_transaction(tx):
     try:
@@ -123,6 +139,7 @@ def process_transaction(tx):
 
         token_address = w3.to_checksum_address(tx["to"])
 
+        # Ignore WETH approvals
         if token_address.lower() == WETH.lower():
             return  
 
@@ -138,15 +155,23 @@ def process_transaction(tx):
             logger.info(f"Token {token_address} already listed, skipping.")
             return
 
+        # Get holder count and filter out if more than 100 holders
         holder_count = get_holder_count(token_address)
         if holder_count > 100:
-            logger.info(f"Skipping {token_address} - {holder_count} holders exceed limit.")
+            logger.info(f"Skipping {token_address} - {holder_count} holders (Above 100)")
             return
 
         name, symbol, decimals = get_token_info(token_address)
+
+        # Filter out tokens with ticker "UNI-V2"
+        if symbol == "UNI-V2":
+            logger.info(f"Skipping {name} ({symbol}) - Ticker is UNI-V2")
+            return
+
         human_amount = amount / (10 ** decimals)
 
-        print(f"{GREEN}[{time.strftime('%H:%M:%S')}] Token: {name} ({symbol}){RESET}")
+        # Colored CLI Output
+        print(f"{GREEN}Token: {name} ({symbol}){RESET}")
         print(f"{YELLOW}Tx Hash: {tx['hash'].hex()}{RESET}")
         print(f"{BLUE}Token Address: {token_address}{RESET}")
         print(f"Spender: {spender} ({spender_router if spender_router else 'Unknown'})")
@@ -169,11 +194,24 @@ def monitor_transactions():
             logger.info(f"Processing block {current_block}")
             block = w3.eth.get_block(current_block, full_transactions=True)
 
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                executor.map(process_transaction, block["transactions"])
+            threads = []
+            for tx in block["transactions"]:
+                t = threading.Thread(target=process_transaction, args=(tx,))
+                t.start()
+                threads.append(t)
+
+            for t in threads:
+                t.join()
 
             last_block = current_block
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {e}. Retrying...")
+            logger.error(f"Error in monitoring loop: {e}")
+            time.sleep(5)
 
-monitor_transactions()
+# Auto-restart on crash
+while True:
+    try:
+        monitor_transactions()
+    except Exception as e:
+        logger.error(f"Critical error: {e}. Restarting in 10 seconds...")
+        time.sleep(10)
