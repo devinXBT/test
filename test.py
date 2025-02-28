@@ -53,11 +53,12 @@ blacklist_addresses = [
     "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
     "0xb0505e5a99abd03d94a1169e638B78EDfEd26ea4",
     "0x22Cf19B7D8DE1B53BbD9792e12eA86191985731F",
-"0xc694a91e6b071bF030A18BD3053A7fE09B6DaE69",
-"0xD04383398dD2426297da660F9CCA3d439AF9ce1b",
-"0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2",
-"0x18a7E9322fe07f4E94c38a2B9A1F2d8489Ff294D",
-"0xeB162b57B70056514Bd5fbBf539F776CA87A6CCD",
+    "0xc694a91e6b071bF030A18BD3053A7fE09B6DaE69",
+    "0xD04383398dD2426297da660F9CCA3d439AF9ce1b",
+    "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2",
+    "0x18a7E9322fe07f4E94c38a2B9A1F2d8489Ff294D",
+    "0xeB162b57B70056514Bd5fbBf539F776CA87A6CCD",
+    "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642",
 ]
 BLACKLISTED_TOKENS = {w3.to_checksum_address(addr) for addr in blacklist_addresses}
 
@@ -137,6 +138,12 @@ def process_transaction(tx):
             return
 
         name, symbol, decimals = get_token_info(token_address)
+
+        # Filter out specific token tickers like UNI-V2
+        if symbol in ["UNI-V2", "UNIV2", "OTHER_UNWANTED_TICKER"]:  # Add more unwanted tickers here if needed
+            logger.info(f"Skipping token with symbol {symbol} as it is blacklisted.")
+            return
+
         human_amount = amount / (10 ** decimals)
 
         # Colored CLI Output with Base Scan URL for token address
