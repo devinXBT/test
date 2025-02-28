@@ -140,7 +140,7 @@ def process_transaction(tx):
         name, symbol, decimals = get_token_info(token_address)
 
         # Filter out specific token tickers like UNI-V2
-        if symbol in ["UNI-V2", "UNIV2", "OTHER_UNWANTED_TICKER"]:  # Add more unwanted tickers here if needed
+        if symbol in ["UNI-V2", "UNIV2", "OTHER_UNWANTED_TICKER","UNK"]:  # Add more unwanted tickers here if needed
             logger.info(f"Skipping token with symbol {symbol} as it is blacklisted.")
             return
 
