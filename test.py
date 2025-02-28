@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import threading
+import requests
 from dotenv import load_dotenv
 from collections import deque
 from cachetools import TTLCache
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 # Load environment variables
 load_dotenv()
 ALCHEMY_BASE_RPC = os.getenv("ALCHEMY_BASE_RPC")
+ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
 
 # Contract Addresses
 UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
@@ -67,14 +69,12 @@ def is_token_listed(token_address):
         return token_cache[token_address]
 
     try:
-        # Batch check Uniswap V3 pools
         for fee in [100, 500, 3000, 10000]:
             pool = factory_v3.functions.getPool(token_address, WETH, fee).call()
             if pool != "0x0000000000000000000000000000000000000000":
                 token_cache[token_address] = True
                 return True
 
-        # Check Uniswap V2 pair
         pair = factory_v2.functions.getPair(token_address, WETH).call()
         if pair != "0x0000000000000000000000000000000000000000":
             token_cache[token_address] = True
@@ -84,6 +84,22 @@ def is_token_listed(token_address):
 
     token_cache[token_address] = False
     return False
+
+def get_holder_count(token_address):
+    try:
+        alchemy_url = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "alchemy_getTokenBalances",
+            "params": [token_address, "erc20"],
+            "id": 1,
+        }
+        response = requests.post(alchemy_url, json=payload, headers=headers).json()
+        return len(response.get("result", {}).get("tokenBalances", []))
+    except Exception as e:
+        logger.error(f"Error fetching holder count for {token_address}: {e}")
+        return 9999  
 
 def get_token_info(token_address):
     token = w3.eth.contract(address=token_address, abi=erc20_abi)
@@ -107,7 +123,6 @@ def process_transaction(tx):
 
         token_address = w3.to_checksum_address(tx["to"])
 
-        # Ignore WETH approvals
         if token_address.lower() == WETH.lower():
             return  
 
@@ -123,10 +138,14 @@ def process_transaction(tx):
             logger.info(f"Token {token_address} already listed, skipping.")
             return
 
+        holder_count = get_holder_count(token_address)
+        if holder_count > 100:
+            logger.info(f"Skipping {token_address} - {holder_count} holders exceed limit.")
+            return
+
         name, symbol, decimals = get_token_info(token_address)
         human_amount = amount / (10 ** decimals)
 
-        # Colored CLI Output
         print(f"{GREEN}[{time.strftime('%H:%M:%S')}] Token: {name} ({symbol}){RESET}")
         print(f"{YELLOW}Tx Hash: {tx['hash'].hex()}{RESET}")
         print(f"{BLUE}Token Address: {token_address}{RESET}")
@@ -139,7 +158,6 @@ def process_transaction(tx):
 def monitor_transactions():
     logger.info("Starting transaction monitoring...")
     last_block = w3.eth.block_number - 1
-    retry_delay = 5  # Initial retry delay in seconds
 
     while True:
         try:
@@ -155,16 +173,7 @@ def monitor_transactions():
                 executor.map(process_transaction, block["transactions"])
 
             last_block = current_block
-            retry_delay = 5  # Reset retry delay after success
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {e}. Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)  # Exponential backoff up to 60s
+            logger.error(f"Error in monitoring loop: {e}. Retrying...")
 
-# Auto-restart on crash
-while True:
-    try:
-        monitor_transactions()
-    except Exception as e:
-        logger.error(f"Critical error: {e}. Restarting in 10 seconds...")
-        time.sleep(10)
+monitor_transactions()
