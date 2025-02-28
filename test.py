@@ -170,10 +170,11 @@ def process_transaction(tx):
 
         human_amount = amount / (10 ** decimals)
 
-        # Colored CLI Output
+        # Colored CLI Output with clickable token address for Base Network
+        token_url = f"https://basescan.org/token/{token_address}"
         print(f"{GREEN}Token: {name} ({symbol}){RESET}")
         print(f"{YELLOW}Tx Hash: {tx['hash'].hex()}{RESET}")
-        print(f"{BLUE}Token Address: {token_address}{RESET}")
+        print(f"{BLUE}Token Address: {token_url}{RESET}")
         print(f"Spender: {spender} ({spender_router if spender_router else 'Unknown'})")
         print("-" * 50)
 
