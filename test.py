@@ -1,11 +1,12 @@
 from web3 import Web3
 import time
-import threading
 import logging
 import os
+import threading
 from dotenv import load_dotenv
 from collections import deque
 from cachetools import TTLCache
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,12 @@ UNISWAP_ROUTERS = {
 
 # WETH Token Address (Base Network)
 WETH = "0x4200000000000000000000000000000000000006"
+
+# ANSI Colors
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -54,35 +61,40 @@ seen_txs = deque(maxlen=5000)
 
 # Cache for token listing status (valid for 10 minutes)
 token_cache = TTLCache(maxsize=10000, ttl=600)
-new_token_cache = TTLCache(maxsize=10000, ttl=600)
 
 def is_token_listed(token_address):
     if token_address in token_cache:
         return token_cache[token_address]
-    
-    if token_address in new_token_cache:
-        logger.info(f"Token {token_address} is new, skipping spam/scam tokens.")
-        return True
-    
-    for fee in [100, 500, 3000, 10000]:
-        try:
+
+    try:
+        # Batch check Uniswap V3 pools
+        for fee in [100, 500, 3000, 10000]:
             pool = factory_v3.functions.getPool(token_address, WETH, fee).call()
             if pool != "0x0000000000000000000000000000000000000000":
                 token_cache[token_address] = True
                 return True
-        except:
-            continue
-    try:
+
+        # Check Uniswap V2 pair
         pair = factory_v2.functions.getPair(token_address, WETH).call()
         if pair != "0x0000000000000000000000000000000000000000":
             token_cache[token_address] = True
             return True
-    except:
-        pass
-    
-    new_token_cache[token_address] = time.time()
+    except Exception as e:
+        logger.error(f"Error checking liquidity for {token_address}: {e}")
+
     token_cache[token_address] = False
     return False
+
+def get_token_info(token_address):
+    token = w3.eth.contract(address=token_address, abi=erc20_abi)
+    try:
+        return (
+            token.functions.name().call(),
+            token.functions.symbol().call(),
+            token.functions.decimals().call(),
+        )
+    except:
+        return "Unknown", "UNK", 18
 
 def process_transaction(tx):
     try:
@@ -94,20 +106,40 @@ def process_transaction(tx):
             return
 
         token_address = w3.to_checksum_address(tx["to"])
+
+        # Ignore WETH approvals
         if token_address.lower() == WETH.lower():
             return  
 
+        input_hex = input_data.hex()
+        spender = w3.to_checksum_address("0x" + input_hex[34:74])
+        amount = int(input_hex[74:], 16)
+
         seen_txs.append(tx["hash"].hex())
+
+        spender_router = next((name for name, addr in UNISWAP_ROUTERS.items() if addr.lower() == spender.lower()), None)
+
         if is_token_listed(token_address):
+            logger.info(f"Token {token_address} already listed, skipping.")
             return
 
-        logger.info(f"New token approval detected: {token_address}")
+        name, symbol, decimals = get_token_info(token_address)
+        human_amount = amount / (10 ** decimals)
+
+        # Colored CLI Output
+        print(f"{GREEN}[{time.strftime('%H:%M:%S')}] Token: {name} ({symbol}){RESET}")
+        print(f"{YELLOW}Tx Hash: {tx['hash'].hex()}{RESET}")
+        print(f"{BLUE}Token Address: {token_address}{RESET}")
+        print(f"Spender: {spender} ({spender_router if spender_router else 'Unknown'})")
+        print("-" * 50)
+
     except Exception as e:
         logger.error(f"Error processing transaction {tx['hash'].hex()}: {e}")
 
 def monitor_transactions():
     logger.info("Starting transaction monitoring...")
     last_block = w3.eth.block_number - 1
+    retry_delay = 5  # Initial retry delay in seconds
 
     while True:
         try:
@@ -119,14 +151,17 @@ def monitor_transactions():
             logger.info(f"Processing block {current_block}")
             block = w3.eth.get_block(current_block, full_transactions=True)
 
-            for tx in block["transactions"]:
-                process_transaction(tx)
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                executor.map(process_transaction, block["transactions"])
 
             last_block = current_block
+            retry_delay = 5  # Reset retry delay after success
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {e}")
-            time.sleep(5)
+            logger.error(f"Error in monitoring loop: {e}. Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)  # Exponential backoff up to 60s
 
+# Auto-restart on crash
 while True:
     try:
         monitor_transactions()
